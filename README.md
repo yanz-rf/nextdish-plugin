@@ -57,6 +57,18 @@ order something vegetarian under $15 for Sunday
 just pick one for me
 ```
 
+### Bulk ordering
+
+Order lunch and dinner across multiple days in one go:
+
+```
+order both lunch and dinner for Mon–Fri next week
+order lunch for the rest of the week, $15–$25 range
+order dinner every day this week, just pick for me
+```
+
+Claude will fetch all the menus upfront, propose a full plan (or pick automatically if you say "just pick"), then execute all orders sequentially without confirmation prompts between each one.
+
 ## How it works
 
 The skill drives your Chrome browser via AppleScript and JavaScript injection — no API keys or credentials needed beyond your existing browser session. It reads the menu, scrapes your order history from `/user-orders`, and navigates the checkout flow.
