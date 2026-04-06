@@ -11,11 +11,26 @@ Order food from NextDish via the Chrome browser session.
 ## Arguments
 
 Parse the user's request for:
-- `date` — delivery date, e.g. "04/05", "Sunday", "tomorrow". Default: next available date from API.
+- `date` — delivery date, e.g. "04/05", "Sunday", "tomorrow", or a range like "Mon–Fri". Default: next available date from API.
+- `meal` — "lunch", "dinner", or "both". Default: "lunch".
 - `filter` — e.g. "vegetarian", "veg", "no pork", a cuisine, a dish name, or a restaurant name.
-- `max_price` — maximum price per item. Default: no limit.
-- `auto` — if user says "just pick one" or "surprise me", auto-select the highest-rated match without asking.
+- `min_price` / `max_price` — price range per item. Default: no limit.
+- `auto` — if user says "just pick one", "surprise me", or "order for me without asking", auto-select top match without confirmation.
 - `recommend` / `history` — if user says "recommend based on history" or "what should I order", fetch order history first and use it to rank suggestions.
+- `bulk` — if dates span multiple days, collect all date+meal pairs upfront, pick dishes for all of them (presenting a full plan if not `auto`), then execute orders sequentially.
+
+## AppleScript ↔ JavaScript data transfer
+
+**Critical pattern**: AppleScript drops large JS return values as `missing value`. Always use `localStorage` as a bridge:
+
+```applescript
+-- Store in JS:
+execute (tab TAB of window WIN) javascript "localStorage.setItem('_key', someValue); 'done'"
+-- Read back separately:
+execute (tab TAB of window WIN) javascript "localStorage.getItem('_key') || 'null'"
+```
+
+Never try to return large objects or long strings directly from `execute javascript`. Filter/summarize in JS first, then store the compact result.
 
 ## Step 1 — Find the NextDish Chrome tab
 
@@ -44,14 +59,6 @@ Store the result as `WIN` and `TAB` (e.g. `WIN=1`, `TAB=9`).
 
 ## Step 2 — Get available dates
 
-Navigate the tab to the menu page for the target date:
-
-```applescript
-tell application "Google Chrome"
-  set URL of (tab TAB of window WIN) to "https://www.nextdish.com/menu?date=YYYY-MM-DD"
-end tell
-```
-
 If the user didn't specify a date, first fetch the latest available date range:
 
 ```javascript
@@ -66,28 +73,46 @@ Parse `startDate` and `endDate` and use `startDate` (or the next day) as default
 
 Convert user-provided dates like "Sunday" or "04/05" to `YYYY-MM-DD` format (year is current or next occurrence).
 
+Navigate the tab to the menu page for the target date. For bulk orders (multiple dates), navigate once per date — don't re-navigate to the same date for lunch and dinner:
+
+```applescript
+tell application "Google Chrome"
+  set URL of (tab TAB of window WIN) to "https://www.nextdish.com/menu?date=YYYY-MM-DD"
+end tell
+```
+
 ## Step 3 — Fetch the menu
 
-After navigating to the menu page, wait ~3 seconds for it to load, then:
+**Fetch via API first** (fast, works before page finishes loading). Store results in localStorage to avoid the AppleScript `missing value` issue with large responses:
 
 ```javascript
 var req = new XMLHttpRequest();
 req.open("GET", "/api/menuInfo?date=YYYY-MM-DD&zipcode=95035", false);
 req.withCredentials = true;
 req.send();
-req.responseText
+// Don't return req.responseText directly — AppleScript drops large values.
+// Instead, filter inline and store the summary:
+var data = JSON.parse(req.responseText);
+var dishes = [];
+data.forEach(function(s){
+  (s.dishes||[]).forEach(function(d){
+    dishes.push(d.supplier.name + "|" + d.name + "|" + d.price + "|" + d.vegetarian + "|" + d.likePercentage + "|" + (d.topLeftTag ? d.topLeftTag.text : ""));
+  });
+});
+localStorage.setItem("_menu", dishes.join("\n"));
+"count:" + dishes.length;
 ```
 
-Parse the JSON array. Each item has:
-- `id` — dish ID
-- `name` — dish name
-- `price` — price
-- `vegetarian` — boolean
-- `spicyLevel` — 0–3
-- `likePercentage` — null or 0–100
-- `supplier.name` — restaurant name
-- `topLeftTag` — `{text: "Best Seller"}` or null
-- `ingredientTags` — array with tag names
+Then read back:
+```javascript
+localStorage.getItem("_menu")
+```
+
+Each line: `supplier|name|price|vegetarian|likePercentage|tag`
+
+**Important**: The `menuInfo` API returns dishes for ALL meal slots. Lunch vs dinner is determined by which DOM tab the dish card appears under — not by the API. Use the DOM tab approach in Step 7 to determine which tab to use.
+
+**Date availability**: If the menu page shows "Sorry, no menu available" text despite the API returning data, that date is not open for ordering — skip it.
 
 ## Step 4 — Fetch order history (when recommending)
 
@@ -150,30 +175,67 @@ If the response is non-empty JSON with existing items, tell the user and ask if 
 
 The page must already be on `https://www.nextdish.com/menu?date=YYYY-MM-DD`.
 
-Find the dish card by matching the dish name in the DOM, then click its add button:
+**Switching lunch/dinner tabs**: Click the appropriate tab before scrolling. The active tab has class `active-1qhgG_sectionSelector`; inactive has `item-2ABnb_sectionSelector`.
 
 ```javascript
-var allCards = document.querySelectorAll("[class*=singleDishCard]");
-var target = Array.from(allCards).find(card => {
-  var hasAddBtn = !!card.querySelector(".add-button-container-1tBhm_singleDishCard");
-  var text = card.innerText || "";
-  return hasAddBtn && text.includes("DISH_NAME_FRAGMENT");
+// Switch to Lunch tab:
+var tab = Array.from(document.querySelectorAll("*")).find(function(el){
+  return el.innerText && el.innerText.trim() === "Lunch" && el.tagName !== "BODY" && el.tagName !== "HTML" && el.children.length === 0;
 });
+tab && tab.click();
+
+// Switch to Dinner tab (replace "Lunch" with "Dinner"):
+```
+
+**Scroll to load all cards** (critical — cards are lazy-loaded):
+
+```javascript
+window.scrollTo(0, document.body.scrollHeight);
+// wait 2–3 seconds, then scroll again:
+window.scrollTo(0, document.body.scrollHeight);
+```
+
+Wait 2–3 seconds after the second scroll before searching.
+
+**Find and click the add button** — use the inner `<button>` selector, NOT the container div:
+
+```javascript
+var allCards = document.querySelectorAll("[class*=single-dish-container]");
+var target = null;
+for (var i = 0; i < allCards.length; i++) {
+  if ((allCards[i].innerText || "").includes("DISH_NAME_FRAGMENT")) {
+    var btn = allCards[i].querySelector(".add-button-t9KIY_singleDishCard");
+    if (btn) { target = btn; break; }
+  }
+}
 if (target) {
-  var btn = target.querySelector(".add-button-container-1tBhm_singleDishCard");
-  var evt = new MouseEvent("click", {bubbles: true, cancelable: true, view: window});
-  btn.dispatchEvent(evt);
+  target.scrollIntoView({block: "center"});
+  target.click();
   "clicked";
 } else { "not found"; }
 ```
 
-Wait 1–2 seconds, then verify the cart shows the expected price:
+**Verify cart updated** — check the cart text includes the expected price:
 
 ```javascript
-(document.querySelector("[class*=checkout-button]") || {innerText: ""}).innerText
+Array.from(document.querySelectorAll("[class*=cart]"))
+  .map(function(e){ return e.innerText.replace(/\n/g, " ").trim(); })
+  .filter(function(t){ return t.includes("$"); })
+  .join(" | ")
 ```
 
-If the cart doesn't update, retry once with the SVG child element.
+If the wrong dish was added accidentally, remove it with:
+
+```javascript
+var card = Array.from(document.querySelectorAll("[class*=single-dish-container]"))
+  .find(function(c){ return (c.innerText||"").includes("WRONG_DISH_NAME"); });
+if (card) {
+  var removeBtn = card.querySelector("[class*=remove-butt]");
+  removeBtn && removeBtn.click();
+}
+```
+
+**For same-date lunch + dinner orders**: Place lunch, complete checkout, then navigate back to `menu?date=YYYY-MM-DD`, switch to Dinner tab, scroll, and add the dinner dish. This avoids an extra page load.
 
 ## Step 8 — Checkout
 
@@ -232,7 +294,18 @@ Wait 4 seconds. Read the success page and report:
 
 - **Tab not found**: Ask user to open nextdish.com in Chrome and enable JavaScript from Apple Events (Chrome menu → View → Developer → Allow JavaScript from Apple Events).
 - **Menu empty / no matching dishes**: Tell the user no dishes match the filter for that date, list what's available, ask them to adjust.
-- **Cart didn't update**: Retry the click once; if still no update, tell user to add manually.
-- **Checkout page shows wrong item**: Stop and tell the user.
-- **Order already exists for that date**: Inform user, ask if they want to add another item.
+- **Dish not found in DOM after scrolling**: The supplier may only appear on the other tab (lunch/dinner). Switch tabs and retry before giving up.
+- **Cart didn't update after clicking**: The wrong button element may have been targeted. Ensure you're clicking `.add-button-t9KIY_singleDishCard` (the `<button>` inside the container), not `.add-button-container-1tBhm_singleDishCard` (the outer DIV).
+- **localStorage returns `null` after storing**: The JS `localStorage.setItem()` call likely threw or the value was too large. Filter data in JS before storing — don't store raw API responses (can be 900KB+).
+- **AppleScript returns `missing value`**: The JS returned a large or complex value. Use the localStorage bridge pattern instead of relying on the direct return value from `execute javascript`.
+- **API shows dishes but page says "no menu available"**: The date is not open for ordering through the UI. Skip it.
+- **Checkout page shows wrong item**: Remove it with the `[class*=remove-butt]` button, then add the correct dish.
+- **Order already exists for that date/meal**: Inform user, ask if they want to add another item.
 - **Place Order button missing**: Stop and tell the user something unexpected happened on the confirmation page.
+
+## Performance tips for bulk orders
+
+- **Fetch all menus via API before placing any orders**: Use `menuInfo` for each date upfront (inline filter to avoid large localStorage values). Build the full order plan, present it, then execute sequentially.
+- **Group lunch + dinner for same date**: Navigate to the date once, place lunch order, then come back to the same page (don't reload — just navigate back), switch tab, place dinner. Saves one page load per day.
+- **Avoid unnecessary scrolls**: Only scroll when you need to find a dish in the DOM. If you already confirmed via API that the dish exists, one scroll pass is usually sufficient.
+- **Check existing orders first**: Call `/api/order/daily?date=YYYY-MM-DD` for all dates before starting. Skip any date that already has an order for that meal slot.
