@@ -112,7 +112,15 @@ Each line: `supplier|name|price|vegetarian|likePercentage|tag`
 
 **Important**: The `menuInfo` API returns dishes for ALL meal slots. Lunch vs dinner is determined by which DOM tab the dish card appears under — not by the API. Use the DOM tab approach in Step 7 to determine which tab to use.
 
-**Date availability**: If the menu page shows "Sorry, no menu available" text despite the API returning data, that date is not open for ordering — skip it.
+**Date availability**: If the menu page shows a "Sorry, no [lunch/dinner] menu is available" message despite the API returning data, that meal slot is not open for ordering — skip it. Check using:
+
+```javascript
+var body = document.body.innerText;
+var noLunch = body.includes('no lunch menu') || (body.includes('Sorry') && body.includes('lunch'));
+var noDinner = body.includes('no dinner menu') || (body.includes('Sorry') && body.includes('dinner'));
+```
+
+Note: some dates have dinner-only (e.g. Sundays). Always check both tabs before concluding a date is fully unavailable.
 
 ## Step 4 — Fetch order history (when recommending)
 
