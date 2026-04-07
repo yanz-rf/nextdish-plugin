@@ -124,7 +124,11 @@ Note: some dates have dinner-only (e.g. Sundays). Always check both tabs before 
 
 ## Step 4 — Fetch order history (when recommending)
 
-If the user asked for recommendations or history-based suggestions, navigate to `/user-orders` and scrape the page:
+**Check Claude memory first**: A preference profile may already be saved (see `nextdish_preferences.md` in memory). If it exists and is recent, use it directly and skip the `/user-orders` scrape — this saves ~6s and a page navigation.
+
+Only scrape `/user-orders` if: (a) no memory profile exists, (b) the user explicitly asks for fresh history, or (c) it has been more than a week since the profile was last updated.
+
+If scraping is needed, navigate to `/user-orders`:
 
 ```applescript
 tell application "Google Chrome"
@@ -260,12 +264,10 @@ Wait 3 seconds. The page navigates to `/group-checkout`. Read the summary:
 document.body.innerText.substring(0, 600)
 ```
 
-Confirm the summary shows:
-- Correct dish and price
-- Business Credit covers it (if applicable)
-- Order Total
+Verify the summary shows the correct dish, price, and Order Total. Always show this to the user.
 
-Show the summary to the user and confirm before proceeding. Do not auto-proceed past this point.
+- **Non-auto mode**: ask the user to confirm before continuing.
+- **Auto mode** (bulk/surprise-me): proceed immediately after showing the summary — no confirmation needed.
 
 ## Step 9 — Place order
 
@@ -282,9 +284,12 @@ Wait 3 seconds. Read the final `/group-place-order` page:
 document.body.innerText.substring(0, 600)
 ```
 
-Show the user the final confirmation (address, payment, total) and ask for explicit approval.
+Show the final confirmation (address, payment, total).
 
-On approval, click **Place Order**:
+- **Non-auto mode**: ask for explicit approval before clicking Place Order.
+- **Auto mode**: proceed immediately.
+
+Click **Place Order**:
 
 ```javascript
 var btn = Array.from(document.querySelectorAll("button")).find(b => b.innerText.includes("Place Order"));
@@ -314,6 +319,23 @@ Wait 4 seconds. Read the success page and report:
 ## Performance tips for bulk orders
 
 - **Fetch all menus via API before placing any orders**: Use `menuInfo` for each date upfront (inline filter to avoid large localStorage values). Build the full order plan, present it, then execute sequentially.
-- **Group lunch + dinner for same date**: Navigate to the date once, place lunch order, then come back to the same page (don't reload — just navigate back), switch tab, place dinner. Saves one page load per day.
-- **Avoid unnecessary scrolls**: Only scroll when you need to find a dish in the DOM. If you already confirmed via API that the dish exists, one scroll pass is usually sufficient.
-- **Check existing orders first**: Call `/api/order/daily?date=YYYY-MM-DD` for all dates before starting. Skip any date that already has an order for that meal slot.
+- **Parallel menu fetches**: For multiple dates, fire all `menuInfo` XHRs concurrently using async JS, then poll localStorage for results. Cuts a 5-date sequential fetch (~5s) down to ~1s:
+  ```javascript
+  ['2026-04-07','2026-04-08','2026-04-09'].forEach(function(date) {
+    fetch('/api/menuInfo?date=' + date + '&zipcode=95035', {credentials:'include'})
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        var dishes = [];
+        data.forEach(function(s){ (s.dishes||[]).forEach(function(d){
+          dishes.push(d.id + '|' + d.supplier.name + '|' + d.name + '|' + d.price + '|' + d.likePercentage + '|' + (d.topLeftTag?d.topLeftTag.text:''));
+        }); });
+        localStorage.setItem('_menu_' + date, dishes.join('\n'));
+      });
+  });
+  ```
+  Poll with `localStorage.getItem('_menu_DATE')` until all are non-null.
+- **The cart has no API — DOM click is mandatory**: Clicking the add button fires zero network requests. The cart is pure React client-side state and only syncs to the server at checkout. There is no shortcut; you must navigate to the menu page and click the button in the DOM.
+- **Use dish `id` from `menuInfo` for reliable DOM matching**: The API returns an `id` field (e.g. `"0845P5STS19BA"`) per dish. Store it and prefer matching by a data attribute or dish name fragment over fuzzy text search.
+- **Group lunch + dinner for same date**: Navigate to the date once, place lunch order, navigate back to the same URL, switch tab, place dinner. Saves one page load per day.
+- **One scroll is enough if the dish is near the top**: Only the second scroll is needed when the target dish is far down the page. For well-known suppliers that appear early (e.g. One Bowl Wonder), a single scroll often suffices.
+- **Check existing orders first**: Call `/api/order/daily?date=YYYY-MM-DD` for all dates before starting. An empty response body (length 0) means no order exists. Skip dates that are already ordered.
